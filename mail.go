@@ -38,12 +38,13 @@ func decodeSubject(raw string) string {
 }
 
 // extractBody holt den Nachrichtentext aus einer Mail: bevorzugt text/plain,
-// ersatzweise aus text/html gewonnener Klartext.
-func extractBody(header mail.Header, body io.Reader) string {
+// ersatzweise aus text/html gewonnener Klartext. Mit stripHTML=false wird das
+// Markup unveraendert durchgereicht (Konfigurationsschalter strip_html).
+func extractBody(header mail.Header, body io.Reader, stripHTML bool) string {
 	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
 
 	if err == nil && strings.HasPrefix(mediaType, "multipart/") {
-		return ParsePart(body, params["boundary"])
+		return ParsePart(body, params["boundary"], stripHTML)
 	}
 
 	b, err := ioutil.ReadAll(body)
@@ -53,7 +54,7 @@ func extractBody(header mail.Header, body io.Reader) string {
 
 	text := decodeContent(b, header.Get("Content-Transfer-Encoding"), params["charset"])
 
-	if strings.HasPrefix(mediaType, "text/html") {
+	if strings.HasPrefix(mediaType, "text/html") && stripHTML {
 		return htmlToText(text)
 	}
 
@@ -253,8 +254,8 @@ func collapse(s string) string {
 // ParsePart durchsucht einen multipart-Body nach verwertbarem Text. Bevorzugt
 // wird text/plain; existiert kein solcher Teil -- QNAP QTS etwa verschickt reine
 // HTML-Mails -- wird aus text/html Klartext gewonnen.
-func ParsePart(body io.Reader, boundary string) string {
-	plain, fromHTML := parseParts(body, boundary)
+func ParsePart(body io.Reader, boundary string, stripHTML bool) string {
+	plain, fromHTML := parseParts(body, boundary, stripHTML)
 
 	if plain != "" {
 		return plain
@@ -265,7 +266,7 @@ func ParsePart(body io.Reader, boundary string) string {
 
 // parseParts liefert Klartext- und HTML-Variante getrennt zurueck, damit der
 // Aufrufer text/plain bevorzugen kann, auch wenn der HTML-Teil zuerst kommt.
-func parseParts(body io.Reader, boundary string) (plain string, fromHTML string) {
+func parseParts(body io.Reader, boundary string, stripHTML bool) (plain string, fromHTML string) {
 	reader := multipart.NewReader(body, boundary)
 
 	for {
@@ -289,7 +290,7 @@ func parseParts(body io.Reader, boundary string) (plain string, fromHTML string)
 		}
 
 		if strings.HasPrefix(mediaType, "multipart/") {
-			nestedPlain, nestedHTML := parseParts(part, params["boundary"])
+			nestedPlain, nestedHTML := parseParts(part, params["boundary"], stripHTML)
 
 			if plain == "" {
 				plain = nestedPlain
@@ -324,10 +325,37 @@ func parseParts(body io.Reader, boundary string) (plain string, fromHTML string)
 
 		if isPlain {
 			plain = strings.TrimSpace(text)
-		} else {
+		} else if stripHTML {
 			fromHTML = htmlToText(text)
+		} else {
+			fromHTML = strings.TrimSpace(text)
 		}
 	}
 
 	return plain, fromHTML
+}
+
+// stripPrefix entfernt eine fuehrende "[...]"-Klammer samt folgendem Leerraum.
+// Bleibt danach nichts uebrig, wird der Betreff unveraendert zurueckgegeben --
+// ein Titel wie "[MyNAS]" allein ist immer noch besser als gar keiner.
+func stripPrefix(subject string) string {
+	rest := strings.TrimSpace(subject)
+
+	if !strings.HasPrefix(rest, "[") {
+		return subject
+	}
+
+	ende := strings.Index(rest, "]")
+
+	if ende < 0 {
+		return subject
+	}
+
+	gekuerzt := strings.TrimSpace(rest[ende+1:])
+
+	if gekuerzt == "" {
+		return subject
+	}
+
+	return gekuerzt
 }
