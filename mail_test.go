@@ -18,7 +18,7 @@ func leseMail(t *testing.T, roh string) (betreff string, text string) {
 		t.Fatalf("Mail nicht lesbar: %v", err)
 	}
 
-	return decodeSubject(m.Header.Get("Subject")), extractBody(m.Header, m.Body)
+	return decodeSubject(m.Header.Get("Subject")), extractBody(m.Header, m.Body, true)
 }
 
 func TestBetreffWirdMimeDekodiert(t *testing.T) {
@@ -210,7 +210,7 @@ func TestEchteQnapTestmail(t *testing.T) {
 	}
 
 	betreff := decodeSubject(m.Header.Get("Subject"))
-	text := extractBody(m.Header, m.Body)
+	text := extractBody(m.Header, m.Body, true)
 
 	if betreff != "[TestNAS] Test Message" {
 		t.Errorf("Betreff = %q", betreff)
