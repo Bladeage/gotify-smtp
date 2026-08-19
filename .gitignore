@@ -1,0 +1,4 @@
+# Baubergebnisse: das Plugin ist ueber 30 MB gross und gehoert an ein Release,
+# nicht in die Historie.
+*.so
+build/
