@@ -1,23 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"crypto/subtle"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"github.com/emersion/go-smtp"
 	"github.com/gotify/plugin-api"
-	"html"
 	"io"
-	"io/ioutil"
-	"mime"
-	"mime/multipart"
-	"mime/quotedprintable"
 	"net"
 	"net/mail"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -68,17 +60,23 @@ type Config struct {
 	// ListenAddr is the address the shared SMTP server binds to.
 	// INSTANCE-WIDE: the last user who saves it wins.
 	ListenAddr string `yaml:"listen_addr"`
+	// StripSubjectPrefix removes a leading bracket from the subject, e.g.
+	// "[MyNAS] Volume degraded" becomes "Volume degraded". Devices like to put
+	// their own name in front of every subject, and Gotify shows the title
+	// right above the text anyway.
+	StripSubjectPrefix bool `yaml:"strip_subject_prefix"`
 }
 
 // DefaultConfig implements plugin.Configurer
 func (c *Plugin) DefaultConfig() interface{} {
 	return &Config{
-		Password:       "",
-		Priority:       0,
-		DefaultTitle:   "(no subject)",
-		StripHTML:      true,
-		AllowedSenders: []string{},
-		ListenAddr:     defaultListenAddr,
+		Password:           "",
+		Priority:           0,
+		DefaultTitle:       "(no subject)",
+		StripHTML:          true,
+		AllowedSenders:     []string{},
+		ListenAddr:         defaultListenAddr,
+		StripSubjectPrefix: false,
 	}
 }
 
@@ -346,36 +344,27 @@ func (s *Session) Data(r io.Reader) error {
 
 	config := s.c.currentConfig()
 
-	var subject string
-	if subjectHeader, ok := m.Header["Subject"]; ok && len(subjectHeader) > 0 {
-		subject = subjectHeader[0]
-	}
+	// Subjects arrive MIME-encoded ("=?utf-8?b?...?=") whenever they contain
+	// anything but plain ASCII, which is the norm for non-English devices.
+	subject := decodeSubject(m.Header.Get("Subject"))
 	if strings.TrimSpace(subject) == "" {
 		subject = config.DefaultTitle
 	}
 
-	mediaType, params, err := mime.ParseMediaType(m.Header.Get("Content-Type"))
+	// extractBody prefers text/plain and falls back to text/html, which is the
+	// only thing many devices send -- QNAP QTS for one.
+	message := extractBody(m.Header, m.Body, config.StripHTML)
 
-	var message string
-	var isHTML bool
+	// Devices like to repeat the subject as the first line of the body. The
+	// title sits right above it in Gotify, so the repetition only costs space.
+	message = strings.TrimLeft(strings.TrimPrefix(message, subject), "\n")
 
-	if err == nil && strings.HasPrefix(mediaType, "multipart/") {
-		message = ParsePart(m.Body, params["boundary"])
-	} else {
-		b, err := ioutil.ReadAll(m.Body)
-		if err != nil {
-			return err
-		}
-		// Without this, a quoted-printable body keeps its soft line breaks and
-		// umlauts arrive as =C3=A4.
-		message = decodeTransferEncoding(b, m.Header.Get("Content-Transfer-Encoding"))
-		isHTML = strings.HasPrefix(mediaType, "text/html")
+	if message == "" {
+		message = subject
 	}
 
-	// An HTML-only mail has no text/plain part, so without this the raw markup
-	// would end up in the notification.
-	if config.StripHTML && (isHTML || looksLikeHTML(message)) {
-		message = stripHTML(message)
+	if config.StripSubjectPrefix {
+		subject = stripPrefix(subject)
 	}
 
 	if s.c != nil && s.c.msgHandler != nil {
@@ -395,104 +384,6 @@ func (s *Session) Reset() {
 
 func (s *Session) Logout() error {
 	return nil
-}
-
-var (
-	htmlTagRe = regexp.MustCompile(`(?is)<[^>]+>`)
-	// No backreference here: Go's RE2 engine does not support them, so the
-	// closing tag is matched by name instead of by group.
-	htmlDropRe   = regexp.MustCompile(`(?is)<\s*(?:script|style|head)\b[^>]*>.*?<\s*/\s*(?:script|style|head)\s*>`)
-	htmlBreakRe  = regexp.MustCompile(`(?i)<\s*(br\s*/?|/p|/div|/tr|/h[1-6])\s*>`)
-	blankLinesRe = regexp.MustCompile(`\n{3,}`)
-	looksHTMLRe  = regexp.MustCompile(`(?is)<\s*(html|body|div|p|br|table)[\s>/]`)
-)
-
-func looksLikeHTML(s string) bool {
-	return looksHTMLRe.MatchString(s)
-}
-
-// stripHTML turns HTML into something readable in a notification. It is
-// deliberately simple - no dependency, no attempt at layout.
-func stripHTML(s string) string {
-	s = htmlDropRe.ReplaceAllString(s, "")
-	s = htmlBreakRe.ReplaceAllString(s, "\n")
-	s = htmlTagRe.ReplaceAllString(s, "")
-	// html.UnescapeString covers every named entity, not just a hand-picked list.
-	s = html.UnescapeString(s)
-
-	s = strings.ReplaceAll(s, "\u00a0", " ")
-
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimSpace(line)
-	}
-	s = strings.Join(lines, "\n")
-	s = blankLinesRe.ReplaceAllString(s, "\n\n")
-
-	return strings.TrimSpace(s)
-}
-
-// decodeTransferEncoding undoes base64 / quoted-printable encoding so that
-// umlauts and soft line breaks do not end up in the notification verbatim.
-func decodeTransferEncoding(b []byte, encoding string) string {
-	switch strings.ToLower(strings.TrimSpace(encoding)) {
-	case "base64":
-		if decoded, err := base64.StdEncoding.DecodeString(string(b)); err == nil {
-			return string(decoded)
-		}
-	case "quoted-printable":
-		if decoded, err := ioutil.ReadAll(quotedprintable.NewReader(bytes.NewReader(b))); err == nil {
-			return string(decoded)
-		}
-	}
-	return string(b)
-}
-
-// ParsePart will find the first text/plain part from a multipart body.
-// Adapted from https://github.com/kirabou/parseMIMEemail.go
-func ParsePart(body io.Reader, boundary string) string {
-	reader := multipart.NewReader(body, boundary)
-
-	if reader == nil {
-		return ""
-	}
-
-	// Go through each of the MIME part of the message Body with NextPart(),
-	for {
-		part, err := reader.NextPart()
-
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			fmt.Println("Error going through the MIME parts -", err)
-			break
-		}
-
-		mediaType, params, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
-
-		if err == nil && strings.HasPrefix(mediaType, "multipart/") {
-			// This is a new multipart to be handled recursively
-			str := ParsePart(part, params["boundary"])
-
-			if str != "" {
-				return str
-			}
-		} else {
-			if strings.HasPrefix(mediaType, "text/plain") {
-				b, err := ioutil.ReadAll(part)
-
-				if err != nil {
-					continue
-				}
-
-				return decodeTransferEncoding(b, part.Header.Get("Content-Transfer-Encoding"))
-			}
-		}
-	}
-
-	return ""
 }
 
 func main() {
