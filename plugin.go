@@ -30,9 +30,11 @@ func GetGotifyPluginInfo() plugin.Info {
 	return plugin.Info{
 		Name:        "SMTP",
 		ModulePath:  "github.com/tystuyfzand/gotify-smtp",
-		Author:      "Tyler Stuyfzand",
-		Website:     "https://meow.tf",
-		Description: "Turns incoming mail into Gotify messages. Point any device that can only send e-mail at it.",
+		Author:      "Tyler Stuyfzand (original), Fabian Geyer (fork)",
+		Website:     "https://github.com/Bladeage/gotify-smtp",
+		Version:     "1.1.0",
+		License:     "MIT",
+		Description: "Turns incoming mail into Gotify messages. Point any device that can only send e-mail at it. This fork also handles HTML-only mails and MIME-encoded subjects.",
 	}
 }
 
