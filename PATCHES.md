@@ -67,6 +67,43 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/proj" -w /proj \
          go build -mod=readonly -a -installsuffix cgo -buildmode=plugin -o smtp-linux-amd64.so .'
 ```
 
+### Zwei Fallen, die beide dieselbe Fehlermeldung erzeugen
+
+Verweigert Gotify das Laden mit `plugin was built with a different version of
+package ...`, liegt es fast nie am Paket, das in der Meldung steht.
+
+**Falle 1: die Version, gegen die gecappt wird.** Gotify hat den Modulpfad erst
+*nach* dem v3.0.0-Release auf `github.com/gotify/server/v3` umgestellt
+(gotify/server#1030, 16.08.2026). Der Tag v3.0.0 vom 18.07.2026 traegt weiterhin
+`module github.com/gotify/server/v2`. Es gibt fuer diesen Tag also **keine**
+Modulversion, die man anfordern koennte: `server/v3@v3.0.0` scheitert am Pfad,
+`server/v2@v3.0.0` an der Major-Version. Das Makefile liest den Pfad deshalb aus
+der heruntergeladenen `go.mod` des Servers und setzt die Anforderung nur, wenn die
+Major-Version passt — `master` bekommt sie, `v3.0.0` nicht. Die Angleichung tragen
+dort die Pins.
+
+**Falle 2: `GOPATH` im Build-Container.** Der Pfad des Modul-Caches steckt in den
+Paket-Hashes, weil ohne `-trimpath` gebaut wird. Bleibt `GOPATH` beim Vorgabewert
+`/go` des Build-Images, passt alles; wird er umgebogen (z. B. `-e GOPATH=/gopath`,
+um einen Cache-Ordner einzuhaengen), entsteht ein Plugin, das **identische**
+Abhaengigkeitsversionen meldet und trotzdem abgelehnt wird. Ein persistenter Cache
+gehoert deshalb nach `/go/pkg/mod` gemountet, nicht an einen eigenen Pfad — genau
+das tut auch das Makefile.
+
+### Vor dem Ausliefern gegenprobieren
+
+`go build` sagt nichts darueber, ob der Server das Ergebnis annimmt. Das zeigt erst
+ein Wegwerf-Server, und der kostet zwanzig Sekunden:
+
+```bash
+mkdir -p /tmp/loadtest/plugins && cp smtp-linux-amd64.so /tmp/loadtest/plugins/
+chmod -R a+rX /tmp/loadtest
+timeout 20 docker run --rm -v /tmp/loadtest:/app/data gotify/server:3.0.0
+```
+
+Exit 124 (der Server laeuft bis zum Timeout) und eine Zeile `Loading plugin ...`
+ohne Panik danach heisst: geladen. Bricht es ab, steht der Grund im Panic-Text.
+
 Wichtigster Test ist `TestDataMitEchterQnapMail`: er laeuft gegen
 `testdata/qnap-test-message.eml` — die echte Testnachricht einer QNAP
 (`multipart/mixed`, ein base64-kodierter `text/html`-Teil, Layout-Tabelle,
