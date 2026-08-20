@@ -17,6 +17,22 @@ create-build-dir:
 update-go-mod: create-build-dir download-tools
 	wget -O ${BUILDDIR}/gotify-server.mod https://raw.githubusercontent.com/gotify/server/${GOTIFY_VERSION}/go.mod
 	gomod-cap -from ${BUILDDIR}/gotify-server.mod -to go.mod
+# Require the server module itself whenever the requested version actually
+# carries a matching module path. Gotify only moved to github.com/gotify/server/v3
+# after v3.0.0 had been tagged (gotify/server#1030), so releases up to and
+# including v3.0.0 declare .../v2 while carrying a v3 tag -- for those no version
+# of the module can be required at all, and the pinning below is what keeps the
+# build aligned. `go get` rather than `go mod edit -require`, because a branch
+# name such as the default `master` has to be resolved to a pseudo-version first.
+	MODPATH=`awk '/^module /{print $$2; exit}' ${BUILDDIR}/gotify-server.mod`; \
+	MODMAJOR=`echo "$$MODPATH" | grep -oE 'v[0-9]+$$' || echo v1`; \
+	REQMAJOR=`echo "${GOTIFY_VERSION}" | grep -oE '^v[0-9]+' || true`; \
+	if [ -z "$$REQMAJOR" ] || [ "$$REQMAJOR" = "$$MODMAJOR" ]; then \
+		echo "requiring $$MODPATH@${GOTIFY_VERSION}"; \
+		go get "$$MODPATH@${GOTIFY_VERSION}"; \
+	else \
+		echo "skipping the server requirement: ${GOTIFY_VERSION} still declares $$MODPATH"; \
+	fi
 # gomod-cap only aligns dependencies that this plugin imports directly -- for
 # this plugin that is just gotify/plugin-api. Go's plugin loader however
 # compares every package linked into both binaries, including transitive ones
